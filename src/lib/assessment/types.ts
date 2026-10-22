@@ -76,6 +76,11 @@ export interface ImprovementPlan {
     label: string;
     headline: string;
     strokes: number;
+    /**
+     * False when no area meaningfully stands out. The plan still has a focus,
+     * but it is a starting point, not a diagnosis.
+     */
+    clear: boolean;
     reasons: string[];
     explanation: string;
     courseTip: string;

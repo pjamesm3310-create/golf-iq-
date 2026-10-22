@@ -1,5 +1,6 @@
 import type { AreaEstimate, Drill, DrillVenue, ImprovementPlan, Venue } from "@/lib/assessment/types";
 import { clearAssessment } from "@/lib/storage";
+import { FeedbackLink } from "./feedback-link";
 import { ButtonLink, Icon, Logo } from "./ui";
 
 const VENUE_LABEL: Record<DrillVenue, string> = {
@@ -43,21 +44,32 @@ export function PlanDashboard({
 
           <div className="animate-rise pt-10 sm:pt-16">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-lime">
-              Your #1 priority · {priority.label}
+              {priority.clear ? "Your #1 priority" : "Suggested starting point"} · {priority.label}
             </p>
             <h1 className="mt-4 max-w-3xl font-display text-[38px] leading-[1.05] font-medium tracking-tight sm:text-6xl">
               {priority.headline}
             </h1>
 
             <div className="mt-10 flex flex-wrap items-end gap-x-10 gap-y-6">
-              <div>
-                <p className="font-display text-7xl leading-none font-medium tracking-tight text-lime sm:text-8xl">
-                  {strokes(priority.strokes)}
-                </p>
-                <p className="mt-3 text-sm text-white/75">
-                  estimated strokes a round, compared with golfers at your goal
-                </p>
-              </div>
+              {priority.clear ? (
+                <div>
+                  <p className="font-display text-7xl leading-none font-medium tracking-tight text-lime sm:text-8xl">
+                    {strokes(priority.strokes)}
+                  </p>
+                  <p className="mt-3 text-sm text-white/75">
+                    estimated strokes a round, compared with golfers at your goal
+                  </p>
+                </div>
+              ) : (
+                <div className="max-w-sm">
+                  <p className="font-display text-4xl leading-tight font-medium tracking-tight text-lime sm:text-5xl">
+                    No single area stands out
+                  </p>
+                  <p className="mt-3 text-sm text-white/75">
+                    Every area is within about half a stroke a round of golfers at your goal.
+                  </p>
+                </div>
+              )}
               <dl className="flex flex-wrap gap-2 pb-1 text-sm">
                 <Pill label="You shoot about" value={String(golfer.typicalScore)} note={golfer.fromHandicap ? "from handicap" : undefined} />
                 <Pill label="Goal" value={target.label} />
@@ -73,7 +85,9 @@ export function PlanDashboard({
         <div className="grid gap-5 lg:grid-cols-5">
           <Card className="lg:col-span-3" delay={60}>
             {plan.insight.text && <Insight kind={plan.insight.kind} text={plan.insight.text} />}
-            <SectionTitle eyebrow="The diagnosis">Why this is your priority</SectionTitle>
+            <SectionTitle eyebrow={priority.clear ? "The diagnosis" : "What we found"}>
+              {priority.clear ? "Why this is your priority" : "Why the plan starts here"}
+            </SectionTitle>
             <ul className="mt-5 space-y-4">
               {priority.reasons.map((reason) => (
                 <li key={reason} className="flex gap-3 leading-relaxed text-ink-soft">
@@ -90,7 +104,7 @@ export function PlanDashboard({
 
           <Card className="lg:col-span-2" delay={120}>
             <SectionTitle eyebrow="Estimated strokes a round">Where your strokes go</SectionTitle>
-            <StrokeBars areas={plan.areas} priority={priority.area} />
+            <StrokeBars areas={plan.areas} priority={priority.clear ? priority.area : null} />
             <p className="mt-5 text-xs leading-relaxed text-ink-muted">
               Compared with typical golfers who {target.label.toLowerCase()}.
               {plan.areas.some((a) => a.assumed) && " Areas marked “typical” used an average figure because you weren't sure."}
@@ -229,6 +243,10 @@ export function PlanDashboard({
             <Icon name="refresh" className="h-4 w-4" />
             Retake the assessment
           </ButtonLink>
+          <p className="mt-6 max-w-md text-sm leading-relaxed text-ink-muted">
+            Was this plan useful? <FeedbackLink>Share feedback</FeedbackLink>. It&apos;s optional and goes to Google
+            Forms — nothing from your assessment is sent unless you type it in.
+          </p>
         </div>
       </div>
     </div>
@@ -286,7 +304,7 @@ function Insight({ kind, text }: { kind: ImprovementPlan["insight"]["kind"]; tex
   );
 }
 
-function StrokeBars({ areas, priority }: { areas: AreaEstimate[]; priority: AreaEstimate["area"] }) {
+function StrokeBars({ areas, priority }: { areas: AreaEstimate[]; priority: AreaEstimate["area"] | null }) {
   const max = Math.max(1, ...areas.map((a) => a.strokes));
   return (
     <ul className="mt-6 space-y-5">

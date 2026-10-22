@@ -17,6 +17,12 @@ export const AREA_ORDER: AreaId[] = ["driving", "approach", "shortGame", "puttin
 /** Points added to the area the golfer feels is weakest, so it wins near-ties only. */
 const PERCEIVED_WEIGHT = 0.5;
 
+/**
+ * Below this many estimated strokes a round, no area meaningfully stands out.
+ * Matches the UI, which shows such estimates as "<0.5".
+ */
+export const CLEAR_PRIORITY_MIN = 0.5;
+
 const TEE_IN_PLAY = { most: 0.75, half: 0.5, few: 0.3 } as const;
 const PENALTIES = { "0-1": 0.5, "2-3": 2.5, "4+": 5 } as const;
 const GREENS = { "0-2": 1, "3-5": 4, "6-9": 7.5, "10+": 11 } as const;
@@ -36,7 +42,13 @@ const PERFORMANCE_KEYS = [
   "blowUps",
 ] as const;
 
-const ROUNDS_PER_WEEK = { rarely: 0.2, "1-2": 0.35, "3-4": 1, "5+": 2 } as const;
+/** Rounds a golfer is likely to play during the four-week plan, in words. */
+const ROUNDS_IN_PLAN = {
+  rarely: "maybe one round",
+  "1-2": "one or two rounds",
+  "3-4": "about four rounds",
+  "5+": "five or more rounds",
+} as const;
 
 const SCHEDULE = {
   "30": { sessions: 2, minutes: 15 },
@@ -234,8 +246,10 @@ function goalFor(area: AreaId, variant: string | null, u: Stats, t: Benchmark) {
       };
     case "putting":
       if (variant === "lag") {
+        // Zero three-putts every round isn't a realistic goal, even for golfers who break 80.
+        const limit = Math.max(1, Math.floor(t.threePutts));
         return {
-          statement: `No more than ${Math.max(0, Math.floor(t.threePutts))} three-putts per round`,
+          statement: `No more than ${limit} ${limit === 1 ? "three-putt" : "three-putts"} per round`,
           measure: "Write the number of putts on every hole.",
         };
       }
@@ -334,16 +348,40 @@ function cap(text: string): string {
 
 function insightFor(
   priority: AreaEstimate,
-  areas: AreaEstimate[],
+  sorted: AreaEstimate[],
   perceived: AssessmentAnswers["perceivedWeakness"],
+  clear: boolean,
 ): ImprovementPlan["insight"] {
+  const label = priority.label.toLowerCase();
+  const leader = sorted[0];
+
+  if (!clear) {
+    if (perceived !== "unsure") {
+      return { kind: "none", text: `You told us ${label} feels weakest. Your answers don't point anywhere else, so the plan starts there.` };
+    }
+    if (priority.strokes > 0) {
+      return { kind: "none", text: `${priority.label} has the largest of several small estimates, so the plan starts there as a first step.` };
+    }
+    return {
+      kind: "none",
+      text: `Your answers didn't separate the five areas, so the plan starts with ${label} as a general first step. If another part of your game feels weaker, retake the assessment and pick it as your weakest area.`,
+    };
+  }
+
   if (perceived === "unsure") {
-    return { kind: "none", text: `You weren't sure which part of your game was weakest. Your answers point to ${priority.label.toLowerCase()}.` };
+    return { kind: "none", text: `You weren't sure which part of your game was weakest. Your answers point to ${label}.` };
   }
   if (perceived === priority.area) {
-    return { kind: "match", text: `You called it. Your answers agree that ${priority.label.toLowerCase()} is where the most strokes are going.` };
+    if (priority.strokes >= leader.strokes) {
+      return { kind: "match", text: `You called it. Your answers agree that ${label} is where the most strokes are going.` };
+    }
+    // The golfer's own read won a near-tie against a slightly larger estimate.
+    return {
+      kind: "none",
+      text: `Your answers put ${label} and ${leader.label.toLowerCase()} close together, so we went with the one you told us feels weakest.`,
+    };
   }
-  const felt = areas.find((a) => a.area === perceived);
+  const felt = sorted.find((a) => a.area === perceived);
   if (!felt) return { kind: "none", text: "" };
   const extra =
     perceived === "putting"
@@ -355,9 +393,17 @@ function insightFor(
   };
 }
 
-function confidenceFor(answers: AssessmentAnswers, typical: number): ImprovementPlan["confidence"] {
+function confidenceFor(answers: AssessmentAnswers, typical: number, clear: boolean): ImprovementPlan["confidence"] {
   const total = PERFORMANCE_KEYS.length;
   const answered = PERFORMANCE_KEYS.filter((k) => answers[k] !== "unsure").length;
+  if (!clear) {
+    return {
+      level: "low",
+      answered,
+      total,
+      note: "Your answers don't separate the five areas, so treat this focus as a starting point rather than a diagnosis. Tracking penalties, greens and putts over a round or two will show where your strokes really go.",
+    };
+  }
   if (answered >= 6) {
     return { level: "high", answered, total, note: `Based on ${answered} of ${total} round stats you gave us.` };
   }
@@ -385,11 +431,18 @@ export function generatePlan(answers: AssessmentAnswers): ImprovementPlan {
   const stats = golferStats(answers, current);
 
   const estimates = estimateAreas(answers, stats, goalLevel);
-  const priorityArea = choosePriority(estimates, answers.perceivedWeakness);
-  const priority = estimates.find((e) => e.area === priorityArea)!;
   const sorted = [...estimates].sort(
     (a, b) => b.strokes - a.strokes || AREA_ORDER.indexOf(a.area) - AREA_ORDER.indexOf(b.area),
   );
+  // When nothing stands out, don't let list order pick a "#1 priority": start
+  // with the golfer's own pick, or else the largest of the small estimates.
+  const clear = sorted[0].strokes >= CLEAR_PRIORITY_MIN;
+  const priorityArea = clear
+    ? choosePriority(estimates, answers.perceivedWeakness)
+    : answers.perceivedWeakness !== "unsure"
+      ? answers.perceivedWeakness
+      : sorted[0].area;
+  const priority = estimates.find((e) => e.area === priorityArea)!;
 
   const content = AREA_CONTENT[priorityArea];
   const variant = variantFor(priorityArea, answers, stats, goalLevel);
@@ -397,15 +450,33 @@ export function generatePlan(answers: AssessmentAnswers): ImprovementPlan {
   const sessions = buildSessions(drills, answers.weeklyPractice);
 
   const reasons = reasonsFor(priorityArea, answers, stats, goalLevel, target.phrase, typical);
-  const runnerUp = sorted.find((a) => a.area !== priorityArea);
-  if (runnerUp && priority.strokes > 0) {
-    reasons.push(
-      `At about ${count(priority.strokes)} strokes a round, it's the biggest of the five areas we estimated. Next is ${runnerUp.label.toLowerCase()}, at about ${count(runnerUp.strokes)}.`,
+  if (!clear) {
+    reasons.unshift(
+      `None of the five areas costs you more than about half a stroke a round compared with ${target.phrase}, so no single area stands out.`,
     );
+  } else {
+    const other = sorted.find((a) => a.area !== priorityArea)!;
+    const otherLabel = other.label.toLowerCase();
+    if (priority.strokes > other.strokes) {
+      reasons.push(
+        `At about ${count(priority.strokes)} strokes a round, it's the biggest of the five areas we estimated. Next is ${otherLabel}, at about ${count(other.strokes)}.`,
+      );
+    } else if (priority.strokes === other.strokes) {
+      reasons.push(
+        `It's level with ${otherLabel} at about ${count(priority.strokes)} strokes a round. ${
+          priorityArea === answers.perceivedWeakness
+            ? "You told us this one feels weakest, so the plan starts here."
+            : "Either is a reasonable place to start; the plan begins here."
+        }`,
+      );
+    } else {
+      // Only reachable when the golfer's own read won a near-tie.
+      reasons.push(
+        `It's close: ${otherLabel} is at about ${count(other.strokes)} strokes a round, against about ${count(priority.strokes)} here.`,
+      );
+    }
   }
 
-  const roundsToTrack = answers.roundsPerMonth === "rarely" ? 2 : 4;
-  const weeks = Math.ceil(roundsToTrack / ROUNDS_PER_WEEK[answers.roundsPerMonth]);
   const goal = goalFor(priorityArea, variant, stats, goalLevel);
   const { sessions: sessionsPerWeek, minutes } = SCHEDULE[answers.weeklyPractice];
 
@@ -418,14 +489,15 @@ export function generatePlan(answers: AssessmentAnswers): ImprovementPlan {
       label: content.label,
       headline: content.headline,
       strokes: priority.strokes,
+      clear,
       reasons,
       explanation: content.explanation,
       courseTip: content.courseTip,
     },
-    insight: insightFor(priority, estimates, answers.perceivedWeakness),
+    insight: insightFor(priority, sorted, answers.perceivedWeakness, clear),
     goal: {
       ...goal,
-      timeframe: `Over your next ${roundsToTrack} rounds — about ${weeks} ${weeks === 1 ? "week" : "weeks"} at your pace.`,
+      timeframe: `Work toward it during the four-week plan, and check it in the rounds you play — ${ROUNDS_IN_PLAN[answers.roundsPerMonth]} at your pace.`,
     },
     schedule: {
       sessionsPerWeek,
@@ -434,12 +506,12 @@ export function generatePlan(answers: AssessmentAnswers): ImprovementPlan {
       phases: [
         { weeks: "Weeks 1–2", title: "Learn the feel", detail: "Do each drill slowly without worrying about the score. Good reps beat perfect ones." },
         { weeks: "Week 3", title: "Add pressure", detail: "Score every drill and write it down. Try to beat your last session." },
-        { weeks: "Week 4", title: "Test it on the course", detail: `Play a round and track your ${content.metric}. Then retake the assessment.` },
+        { weeks: "Week 4", title: "Test it on the course", detail: `Play a round if you can and track your ${content.metric}. Then retake the assessment.` },
       ],
     },
     drills: drills.map(({ id, name, venue, summary, steps, success }) => ({ id, name, venue, summary, steps, success })),
     areas: sorted,
-    confidence: confidenceFor(answers, typical),
-    checkIn: `Retake the assessment after your next ${roundsToTrack} rounds to see whether your priority has shifted.`,
+    confidence: confidenceFor(answers, typical, clear),
+    checkIn: "When you finish the four-week plan and have played at least one round, retake the assessment for an updated priority.",
   };
 }

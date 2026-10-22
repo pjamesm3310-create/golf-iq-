@@ -1,3 +1,4 @@
+import { FeedbackLink } from "@/components/feedback-link";
 import { HomeActions } from "@/components/home-actions";
 import { Icon, Logo } from "@/components/ui";
 
@@ -76,6 +77,9 @@ export default function Home() {
             swing analysis.
           </p>
           <p>No account needed. Your answers stay in this browser.</p>
+          <p>
+            Have a thought on GolfIQ? <FeedbackLink>Share feedback</FeedbackLink> — optional, via Google Forms.
+          </p>
         </div>
       </footer>
     </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generatePlan, selectDrills, targetFor, typicalScore } from "./engine";
+import { CLEAR_PRIORITY_MIN, generatePlan, selectDrills, targetFor, typicalScore } from "./engine";
 import { QUESTIONS } from "./questions";
 import { rulesProvider } from "./provider";
 import type { AssessmentAnswers } from "./types";
@@ -57,7 +57,7 @@ describe("priority", () => {
     );
     expect(plan.priority.area).toBe("putting");
     expect(plan.drills.map((d) => d.id)).toContain("ladder-lag");
-    expect(plan.goal.statement).toMatch(/three-putts/);
+    expect(plan.goal.statement).toBe("No more than 1 three-putt per round");
   });
 
   it("trains short putts when three-putts are already rare", () => {
@@ -191,6 +191,131 @@ describe("every combination stays well-formed", () => {
       }
       const text = JSON.stringify(plan);
       expect(text).not.toMatch(/undefined|NaN|Infinity/);
+
+      // Regression invariants: honest priority, achievable goals, consistent timeframe.
+      const top = plan.areas[0].strokes;
+      const others = plan.areas.filter((a) => a.area !== plan.priority.area);
+      expect(plan.priority.clear).toBe(top >= CLEAR_PRIORITY_MIN);
+      if (!plan.priority.clear) {
+        expect(plan.confidence.level).toBe("low");
+        expect(plan.priority.reasons[0]).toMatch(/no single area stands out/);
+        expect(["match", "mismatch"]).not.toContain(plan.insight.kind);
+      }
+      if (plan.priority.reasons.some((r) => r.includes("it's the biggest"))) {
+        expect(others.every((a) => plan.priority.strokes > a.strokes)).toBe(true);
+      }
+      if (plan.insight.text.startsWith("You called it")) {
+        expect(plan.priority.strokes).toBe(top);
+      }
+      expect(plan.goal.statement).not.toMatch(/\b0 three-putt/);
+      expect(plan.goal.statement).not.toMatch(/\b1 three-putts\b/);
+      expect(plan.goal.timeframe).toMatch(/four-week plan/);
+      expect(plan.goal.timeframe).not.toMatch(/\d+ weeks?/);
+      expect(plan.checkIn).toMatch(/four-week plan/);
+    }
+  });
+});
+
+describe("no clear priority", () => {
+  // Shoots 100 with answers at or better than golfers who break 100 in every area.
+  const level = make({ score: { kind: "score", value: 100 } });
+
+  it("does not present list order as a definitive #1 priority", () => {
+    const plan = generatePlan(level);
+    expect(plan.areas.every((a) => a.strokes === 0)).toBe(true);
+    expect(plan.priority.clear).toBe(false);
+    expect(plan.confidence.level).toBe("low");
+    expect(plan.priority.reasons[0]).toMatch(/no single area stands out/);
+    expect(plan.priority.reasons.join(" ")).not.toMatch(/biggest/);
+    expect(plan.insight.text).toMatch(/didn't separate the five areas/);
+    expect(plan.insight.text).toMatch(/general first step/);
+  });
+
+  it("starts with the golfer's own pick when they gave one", () => {
+    const plan = generatePlan({ ...level, perceivedWeakness: "putting" });
+    expect(plan.priority.clear).toBe(false);
+    expect(plan.priority.area).toBe("putting");
+    expect(plan.insight.kind).toBe("none");
+    expect(plan.insight.text).toMatch(/You told us putting feels weakest/);
+  });
+
+  it("uses the largest of several small estimates, and says so", () => {
+    // Good everywhere, unsure only about tee shots: the assumed figure gives a small estimate.
+    const plan = generatePlan(
+      make({ teeInPlay: "unsure", penalties: "0-1", greens: "6-9", chipProximity: "usually", putts: "30-33", threePutts: "0-1", blowUps: "0-2" }),
+    );
+    expect(plan.priority.clear).toBe(false);
+    expect(plan.priority.area).toBe("driving");
+    expect(plan.priority.strokes).toBeGreaterThan(0);
+    expect(plan.priority.strokes).toBeLessThan(CLEAR_PRIORITY_MIN);
+    expect(plan.insight.text).toMatch(/largest of several small estimates/);
+  });
+
+  it("leaves a clear result alone", () => {
+    const plan = generatePlan(make({ chipProximity: "rarely" }));
+    expect(plan.priority.clear).toBe(true);
+    expect(plan.confidence.level).toBe("high");
+    expect(plan.priority.reasons.some((r) => r.includes("it's the biggest"))).toBe(true);
+  });
+});
+
+describe("honest ranking wording", () => {
+  it("doesn't call the golfer's pick the biggest when it won a near-tie", () => {
+    const [first, second] = generatePlan(base).areas;
+    expect(second.strokes).toBeLessThan(first.strokes);
+    const plan = generatePlan(make({ perceivedWeakness: second.area }));
+    expect(plan.priority.area).toBe(second.area);
+    expect(plan.priority.reasons.join(" ")).not.toMatch(/biggest/);
+    expect(plan.priority.reasons.at(-1)).toMatch(/^It's close/);
+    expect(plan.insight.kind).toBe("none");
+    expect(plan.insight.text).not.toMatch(/You called it/);
+  });
+
+  it("calls an exact tie a tie", () => {
+    // Search a fixed slice of the answer space for a clear result with a tie at the top.
+    const values = (key: keyof AssessmentAnswers) => {
+      const q = QUESTIONS.find((x) => x.key === key)!;
+      return q.kind === "score" ? [] : q.options.map((o) => o.value);
+    };
+    let tied: ReturnType<typeof generatePlan> | undefined;
+    search: for (const score of [85, 95, 105])
+      for (const teeInPlay of values("teeInPlay"))
+        for (const greens of values("greens"))
+          for (const putts of values("putts"))
+            for (const blowUps of values("blowUps")) {
+              const plan = generatePlan(make({ score: { kind: "score", value: score }, teeInPlay, greens, putts, blowUps } as Partial<AssessmentAnswers>));
+              if (plan.priority.clear && plan.areas[0].strokes === plan.areas[1].strokes) {
+                tied = plan;
+                break search;
+              }
+            }
+    expect(tied).toBeDefined();
+    expect(tied!.priority.reasons.join(" ")).not.toMatch(/biggest/);
+    expect(tied!.priority.reasons.at(-1)).toMatch(/^It's level with/);
+  });
+});
+
+describe("goals", () => {
+  const threePutter = { putts: "38+", threePutts: "4+", chipProximity: "usually", penalties: "0-1", teeInPlay: "most", greens: "6-9", blowUps: "0-2" } as const;
+
+  it("never asks for zero three-putts", () => {
+    // Golfers who break 80 average about one three-putt; rounding that down used to give 0.
+    const plan = generatePlan(make({ ...threePutter, score: { kind: "score", value: 85 } }));
+    expect(plan.priority.area).toBe("putting");
+    expect(plan.goal.statement).toBe("No more than 1 three-putt per round");
+  });
+
+  it("uses the plural above one", () => {
+    const plan = generatePlan(make({ ...threePutter, score: { kind: "score", value: 105 } }));
+    expect(plan.priority.area).toBe("putting");
+    expect(plan.goal.statement).toBe("No more than 2 three-putts per round");
+  });
+
+  it("keeps the timeframe within the four-week plan for every play frequency", () => {
+    const phrases = { rarely: "maybe one round", "1-2": "one or two rounds", "3-4": "about four rounds", "5+": "five or more rounds" } as const;
+    for (const [roundsPerMonth, phrase] of Object.entries(phrases)) {
+      const plan = generatePlan(make({ roundsPerMonth: roundsPerMonth as AssessmentAnswers["roundsPerMonth"] }));
+      expect(plan.goal.timeframe).toBe(`Work toward it during the four-week plan, and check it in the rounds you play — ${phrase} at your pace.`);
     }
   });
 });
